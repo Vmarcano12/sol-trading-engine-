@@ -39,6 +39,7 @@ async function fapi(endpoint, method = 'GET', params = {}) {
     method: method,
     headers: {
       'X-MBX-APIKEY': API_KEY,
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       'Content-Type': 'application/json'
     }
   });
@@ -73,7 +74,6 @@ function calculateRSI(closes, period = 14) {
 }
 
 export default async function handler(req, res) {
-  // Validación de seguridad para que nadie pueda ejecutar el bot sin la clave
   const auth = req.query.auth || req.headers['authorization'];
   if (auth !== BOT_SECRET_TOKEN) {
     return res.status(401).json({ status: 'error', message: 'Acceso no autorizado' });
@@ -105,9 +105,22 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3. Velas y RSI 1h
-    const resKlines = await fetch(`${FUTURES_BASE}/fapi/v1/klines?symbol=${SYMBOL}&interval=1h&limit=50`);
-    const klines = await resKlines.json();
+    // 3. Velas y RSI 1h (con User-Agent y respaldo)
+    let klines = [];
+    try {
+      const resKlines = await fetch(`${FUTURES_BASE}/fapi/v1/klines?symbol=${SYMBOL}&interval=1h&limit=50`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      });
+      klines = await resKlines.json();
+    } catch (e) {}
+
+    if (!Array.isArray(klines) || klines.length === 0) {
+      const resSpot = await fetch(`https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1h&limit=50`, {
+        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+      });
+      klines = await resSpot.json();
+    }
+
     const closes = klines.map(k => parseFloat(k[4]));
     const currentPrice = closes[closes.length - 1];
     const rsi14 = calculateRSI(closes, 14);
@@ -123,19 +136,16 @@ export default async function handler(req, res) {
       const diffPct = isLong ? (currentPrice - entry) / entry : (entry - currentPrice) / entry;
       const pnlUSDT = openPosition.unrealizedProfit;
 
-      // Take Profit (+3.0%)
       if (diffPct >= TP_PCT) {
         await fapi('/fapi/v1/order', 'POST', { symbol: SYMBOL, side: exitSide, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
         actionTaken = `TAKE_PROFIT: +$${pnlUSDT.toFixed(2)} USDT`;
-        await sendTelegram(`<b>[CIERRE EN GANANCIA] TAKE PROFIT (SOL)</b>\n\n• Ganancia neta: <b>+$${pnlUSDT.toFixed(2)} USDT</b> (+${(diffPct * 100 * LEVERAGE).toFixed(1)}% ROE)\n• Precio de salida: $${currentPrice}\n• Saldo consolidado: <b>$${(totalWalletBalance + pnlUSDT).toFixed(2)} USDT</b>`);
-      }
-      // Stop Loss (-1.5%)
-      else if (diffPct <= -SL_PCT) {
+        await sendTelegram(`<b>[CIERRE EN GANANCIA] TAKE PROFIT (SOL)</b>\n\n• Ganancia neta: <b>+$${pnlUSDT.toFixed(2)} USDT</b> (+${(diffPct * 100 * LEVERAGE).toFixed(1)}% ROE)\n• Salida: $${currentPrice}\n• Saldo: <b>$${(totalWalletBalance + pnlUSDT).toFixed(2)} USDT</b>`);
+      } else if (diffPct <= -SL_PCT) {
         await fapi('/fapi/v1/order', 'POST', { symbol: SYMBOL, side: exitSide, type: 'MARKET', quantity: qty, reduceOnly: 'true' });
         actionTaken = `STOP_LOSS: -$${Math.abs(pnlUSDT).toFixed(2)} USDT`;
-        await sendTelegram(`<b>[PROTECCIÓN DE CAPITAL] STOP LOSS (SOL)</b>\n\n• Pérdida limitada: -$${Math.abs(pnlUSDT).toFixed(2)} USDT\n• Saldo protegido: <b>$${(totalWalletBalance + pnlUSDT).toFixed(2)} USDT</b>`);
+        await sendTelegram(`<b>[PROTECCIÓN DE CAPITAL] STOP LOSS (SOL)</b>\n\n• Pérdida: -$${Math.abs(pnlUSDT).toFixed(2)} USDT\n• Saldo: <b>$${(totalWalletBalance + pnlUSDT).toFixed(2)} USDT</b>`);
       }
-    }
+    } 
     // 5. Evaluar entrada si no hay posición
     else {
       if (availableBalance >= MARGIN_PER_TRADE) {
@@ -151,7 +161,7 @@ export default async function handler(req, res) {
             actionTaken = `LONG_OPENED: ${qty} SOL`;
             const tpPrice = (currentPrice * (1 + TP_PCT)).toFixed(2);
             const slPrice = (currentPrice * (1 - SL_PCT)).toFixed(2);
-            await sendTelegram(`<b>[NUEVA OPERACIÓN EJECUTADA] FUTUROS 5X (SOL)</b>\n\n• Posición: <b>LONG</b>\n• Volumen: <b>${qty} SOL</b> (~$${notionalValue.toFixed(2)})\n• Margen: <b>$${MARGIN_PER_TRADE} USDT (Aislado)</b>\n• RSI 1h: <b>${rsi14.toFixed(1)}</b>\n\n• Meta Take Profit: <b>$${tpPrice}</b> (+3.0% / +$3.75 USDT)\n• Stop Loss Estricto: <b>$${slPrice}</b> (-1.5% / -$1.87 USDT)\n\n<i>Motor Serverless activo en Vercel.</i>`);
+            await sendTelegram(`<b>[NUEVA OPERACIÓN EJECUTADA] FUTUROS 5X (SOL)</b>\n\n• Posición: <b>LONG</b>\n• Volumen: <b>${qty} SOL</b> (~$${notionalValue.toFixed(2)})\n• Margen: <b>$${MARGIN_PER_TRADE} USDT</b>\n• RSI 1h: <b>${rsi14.toFixed(1)}</b>\n\n• TP: <b>$${tpPrice}</b> (+3.0% / +$3.75 USDT)\n• SL: <b>$${slPrice}</b> (-1.5% / -$1.87 USDT)`);
           }
         }
       }
@@ -163,7 +173,8 @@ export default async function handler(req, res) {
       action: actionTaken,
       price: currentPrice,
       rsi14: rsi14.toFixed(2),
-      balance: totalWalletBalance,
+      balanceUSDT: totalWalletBalance,
+      availableUSDT: availableBalance,
       openPosition: openPosition
     });
 
