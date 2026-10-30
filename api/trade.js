@@ -39,7 +39,6 @@ async function fapi(endpoint, method = 'GET', params = {}) {
     method: method,
     headers: {
       'X-MBX-APIKEY': API_KEY,
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
       'Content-Type': 'application/json'
     }
   });
@@ -80,11 +79,14 @@ export default async function handler(req, res) {
   }
 
   try {
-    // 1. Balance de cuenta
+    // 1. Balance de cuenta en Binance Futuros
     const fAccount = await fapi('/fapi/v2/account');
+    if (fAccount.code && fAccount.code !== 200) {
+      return res.status(400).json({ status: 'error_binance', response: fAccount });
+    }
+
     let availableBalance = 0;
     let totalWalletBalance = 0;
-
     for (const asset of fAccount.assets || []) {
       if (asset.asset === 'USDT') {
         availableBalance = parseFloat(asset.availableBalance);
@@ -105,20 +107,12 @@ export default async function handler(req, res) {
       }
     }
 
-    // 3. Velas y RSI 1h (con User-Agent y respaldo)
-    let klines = [];
-    try {
-      const resKlines = await fetch(`${FUTURES_BASE}/fapi/v1/klines?symbol=${SYMBOL}&interval=1h&limit=50`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-      });
-      klines = await resKlines.json();
-    } catch (e) {}
+    // 3. Velas de 1H
+    const resKlines = await fetch(`${FUTURES_BASE}/fapi/v1/klines?symbol=${SYMBOL}&interval=1h&limit=50`);
+    const klines = await resKlines.json();
 
-    if (!Array.isArray(klines) || klines.length === 0) {
-      const resSpot = await fetch(`https://api.binance.com/api/v3/klines?symbol=${SYMBOL}&interval=1h&limit=50`, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
-      });
-      klines = await resSpot.json();
+    if (!Array.isArray(klines)) {
+      return res.status(400).json({ status: 'error_klines', response: klines });
     }
 
     const closes = klines.map(k => parseFloat(k[4]));
@@ -161,7 +155,7 @@ export default async function handler(req, res) {
             actionTaken = `LONG_OPENED: ${qty} SOL`;
             const tpPrice = (currentPrice * (1 + TP_PCT)).toFixed(2);
             const slPrice = (currentPrice * (1 - SL_PCT)).toFixed(2);
-            await sendTelegram(`<b>[NUEVA OPERACIÓN EJECUTADA] FUTUROS 5X (SOL)</b>\n\n• Posición: <b>LONG</b>\n• Volumen: <b>${qty} SOL</b> (~$${notionalValue.toFixed(2)})\n• Margen: <b>$${MARGIN_PER_TRADE} USDT</b>\n• RSI 1h: <b>${rsi14.toFixed(1)}</b>\n\n• TP: <b>$${tpPrice}</b> (+3.0% / +$3.75 USDT)\n• SL: <b>$${slPrice}</b> (-1.5% / -$1.87 USDT)`);
+            await sendTelegram(`<b>[NUEVA ORDEN EJECUTADA] FUTUROS 5X (SOL)</b>\n\n• Posición: <b>LONG</b>\n• Volumen: <b>${qty} SOL</b> (~$${notionalValue.toFixed(2)})\n• Margen: <b>$${MARGIN_PER_TRADE} USDT</b>\n• RSI 1h: <b>${rsi14.toFixed(1)}</b>\n\n• TP: <b>$${tpPrice}</b> (+3.0% / +$3.75 USDT)\n• SL: <b>$${slPrice}</b> (-1.5% / -$1.87 USDT)`);
           }
         }
       }
